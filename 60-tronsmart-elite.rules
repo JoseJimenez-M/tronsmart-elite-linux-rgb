@@ -1,0 +1,2 @@
+# Tronsmart Elite / Elite Pro (SONiX 0c45:7044): let the logged-in user send USB control transfers.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0c45", ATTR{idProduct}=="7044", TAG+="uaccess"

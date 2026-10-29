@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Set a static LED color on a Tronsmart Elite keyboard (SONiX 0c45:7044).
+
+Protocol from the official "Tronsmart Elite Driver" (sdk/DriverIO/DeviceAPI/k68.ts):
+64-byte HID feature report via SET_REPORT on interface 2 (the vendor interface
+Linux leaves unbound because it has no interrupt-IN endpoint).
+
+  tronsmart-color            read current light setting (read-only)
+  tronsmart-color ff0000     static red, max brightness
+  tronsmart-color 00ff00 3   static green, brightness 0-6
+"""
+import ctypes, fcntl, glob, os, struct, sys
+
+VID, PID, IFACE = "0c45", "7044", 2
+# ponytail: raw usbfs ioctls instead of pyusb; struct layout assumes 64-bit Linux.
+USBDEVFS_CONTROL = 0xC0185500
+USBDEVFS_CLAIMINTERFACE = 0x8004550F
+USBDEVFS_RELEASEINTERFACE = 0x80045510
+
+
+def find_dev():
+    for d in glob.glob("/sys/bus/usb/devices/*/idVendor"):
+        d = os.path.dirname(d)
+        rd = lambda f: open(f"{d}/{f}").read().strip()
+        if rd("idVendor") == VID and rd("idProduct") == PID:
+            return f"/dev/bus/usb/{int(rd('busnum')):03d}/{int(rd('devnum')):03d}"
+    sys.exit("Tronsmart Elite not found (is it plugged in by USB?)")
+
+
+def ctrl(fd, req_type, req, value, data):
+    buf = ctypes.create_string_buffer(bytes(data), 64)
+    xfer = struct.pack("=BBHHHI4xQ", req_type, req, value, IFACE, 64, 1000, ctypes.addressof(buf))
+    fcntl.ioctl(fd, USBDEVFS_CONTROL, xfer)
+    return buf.raw
+
+
+def set_feature(fd, data):  # HID SET_REPORT, feature, report id 0
+    ctrl(fd, 0x21, 0x09, 0x0300, data)
+
+
+def get_feature(fd):  # HID GET_REPORT, feature, report id 0
+    return ctrl(fd, 0xA1, 0x01, 0x0300, b"")
+
+
+def main():
+    fd = os.open(find_dev(), os.O_RDWR)
+    iface = struct.pack("I", IFACE)
+    fcntl.ioctl(fd, USBDEVFS_CLAIMINTERFACE, iface)
+    try:
+        if len(sys.argv) == 1:
+            set_feature(fd, b"\x84")  # "get light setting" command
+            r = get_feature(fd)
+            print(f"effect={r[1]} speed={5 - r[2]} brightness={r[3]} option={r[4]} rgb={r[5]:02x}{r[6]:02x}{r[7]:02x}")
+            return
+        rgb = int(sys.argv[1].lstrip("#"), 16)
+        if not 0 <= rgb <= 0xFFFFFF:
+            sys.exit("color must be 6 hex digits, e.g. ff0000")
+        if rgb == 0xFFFFFF:
+            rgb = 0xFAFFFA  # the official driver does this for pure white
+        bright = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+        if not 0 <= bright <= 6:
+            sys.exit("brightness must be 0-6")
+        # 0x04 set light, effect 1 = always on, 5 - speed(0), brightness, option 7 = custom rgb
+        set_feature(fd, bytes([0x04, 0x01, 0x05, bright, 0x07, rgb >> 16, (rgb >> 8) & 0xFF, rgb & 0xFF]))
+        print(f"set #{rgb:06x} brightness {bright}")
+    finally:
+        fcntl.ioctl(fd, USBDEVFS_RELEASEINTERFACE, iface)
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    main()
